@@ -1,6 +1,7 @@
 package gofakes3_test
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/xml"
 	"fmt"
@@ -182,6 +183,102 @@ func TestCreateObjectMD5(t *testing.T) {
 	}
 }
 
+func TestCreateObjectWithMissingContentLength(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	client := ts.rawClient()
+	body := []byte{}
+	rq, err := http.NewRequest("PUT", client.URL(fmt.Sprintf("/%s/yep", defaultBucket)).String(), maskReader(bytes.NewReader(body)))
+	if err != nil {
+		panic(err)
+	}
+	client.SetHeaders(rq, body)
+	rs, _ := client.Do(rq)
+	if rs.StatusCode != http.StatusLengthRequired {
+		t.Fatal()
+	}
+}
+
+func TestCreateObjectWithInvalidContentLength(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	client := ts.rawClient()
+
+	body := []byte{1, 2, 3}
+	rq, err := http.NewRequest("PUT", client.URL(fmt.Sprintf("/%s/yep", defaultBucket)).String(), maskReader(bytes.NewReader(body)))
+	if err != nil {
+		panic(err)
+	}
+
+	client.SetHeaders(rq, body)
+	rq.Header.Set("Content-Length", "quack")
+	raw, err := client.SendRaw(rq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rs, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(raw)), rq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rs.Body.Close()
+
+	if rs.StatusCode != http.StatusBadRequest {
+		t.Fatal(rs.StatusCode, "!=", http.StatusBadRequest)
+	}
+}
+
+func TestCopyObject(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	svc := ts.s3Client()
+
+	srcMeta := map[string]string{
+		"Content-Type":   "text/plain",
+		"X-Amz-Meta-One": "src",
+		"X-Amz-Meta-Two": "src",
+	}
+	ts.backendPutString(defaultBucket, "src-key", srcMeta, "content")
+
+	out, err := svc.CopyObject(&s3.CopyObjectInput{
+		Bucket:     aws.String(defaultBucket),
+		Key:        aws.String("dst-key"),
+		CopySource: aws.String("/" + defaultBucket + "/src-key"),
+		Metadata: map[string]*string{
+			"Two":   aws.String("dst"),
+			"Three": aws.String("dst"),
+		},
+	})
+	ts.OK(err)
+
+	if *out.CopyObjectResult.ETag != `"9a0364b9e99bb480dd25e1f0284c8555"` { // md5("content")
+		ts.Fatal("bad etag", *out.CopyObjectResult.ETag)
+	}
+
+	obj, err := ts.backend.GetObject(defaultBucket, "dst-key", nil)
+	ts.OK(err)
+
+	defer obj.Contents.Close()
+	data, err := ioutil.ReadAll(obj.Contents)
+	ts.OK(err)
+
+	if string(data) != "content" {
+		t.Fatal("object copying failed")
+	}
+
+	if v := obj.Metadata["X-Amz-Meta-One"]; v != "src" {
+		t.Fatalf("bad Content-Type: %q", v)
+	}
+
+	if v := obj.Metadata["X-Amz-Meta-Two"]; v != "dst" {
+		t.Fatalf("bad Content-Encoding: %q", v)
+	}
+
+	if v := obj.Metadata["X-Amz-Meta-Three"]; v != "dst" {
+		t.Fatalf("bad Content-Encoding: %q", v)
+	}
+}
+
 func TestDeleteBucket(t *testing.T) {
 	t.Run("delete-empty", func(t *testing.T) {
 		ts := newTestServer(t, withoutInitialBuckets())
@@ -272,6 +369,25 @@ func TestDeleteMulti(t *testing.T) {
 		assertDeletedKeys(t, rs, "bar", "foo")
 		ts.assertLs(defaultBucket, "", nil, []string{"baz"})
 	})
+}
+
+func TestGetBucketLocation(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	svc := ts.s3Client()
+
+	ts.backendPutString(defaultBucket, "foo", nil, "one")
+
+	out, err := svc.GetBucketLocation(&s3.GetBucketLocationInput{
+		Bucket: aws.String(defaultBucket),
+	})
+	if err != nil {
+		t.Fatal("get-bucket-location-failed", err)
+	}
+
+	if out.LocationConstraint != nil {
+		t.Fatal("location-constraint-not-empty", *out.LocationConstraint)
+	}
 }
 
 func TestGetObjectRange(t *testing.T) {
