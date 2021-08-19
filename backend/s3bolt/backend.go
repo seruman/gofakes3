@@ -8,10 +8,11 @@ import (
 	"io"
 	"log"
 
-	"github.com/johannesboyne/gofakes3"
-	"github.com/johannesboyne/gofakes3/internal/s3io"
 	bolt "go.etcd.io/bbolt"
 	"gopkg.in/mgo.v2/bson"
+
+	"github.com/johannesboyne/gofakes3"
+	"github.com/johannesboyne/gofakes3/internal/s3io"
 )
 
 var (
@@ -139,7 +140,6 @@ func (db *Backend) ListBucket(name string, prefix *gofakes3.Prefix, page gofakes
 	}
 
 	objects := gofakes3.NewObjectList()
-	mod := gofakes3.NewContentTime(db.timeSource.Now())
 
 	err := db.bolt.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(name))
@@ -166,7 +166,7 @@ func (db *Backend) ListBucket(name string, prefix *gofakes3.Prefix, page gofakes
 				}
 				item := &gofakes3.Content{
 					Key:          string(k[:]),
-					LastModified: mod,
+					LastModified: gofakes3.NewContentTime(b.LastModified),
 					ETag:         `"` + hex.EncodeToString(b.Hash[:]) + `"`,
 					Size:         b.Size,
 				}
@@ -312,11 +312,12 @@ func (db *Backend) PutObject(
 		}
 
 		data, err := bson.Marshal(&boltObject{
-			Name:     objectName,
-			Metadata: meta,
-			Size:     int64(len(bts)),
-			Contents: bts,
-			Hash:     hash[:],
+			Name:         objectName,
+			Metadata:     meta,
+			Size:         int64(len(bts)),
+			Contents:     bts,
+			Hash:         hash[:],
+			LastModified: db.timeSource.Now(),
 		})
 		if err != nil {
 			return err
